@@ -170,6 +170,8 @@ spec:
         app: fdb-kubernetes-operator-controller-manager
         control-plane: controller-manager
     spec:
+      imagePullSecrets:
+      - name: dockerhub-secret
       containers:
       - command:
         - /manager
