@@ -64,6 +64,7 @@ module "eks" {
   cluster_addons = {
     aws-efs-csi-driver = {
       most_recent = true
+      service_account_role_arn = module.efs_csi_irsa_role.iam_role_arn
     }
   }
 
@@ -92,46 +93,83 @@ module "eks" {
   }
 }
 
-# EFS File System
-resource "aws_efs_file_system" "main" {
-  creation_token = "eks-efs"
+# IAM Policy for EFS CSI Driver
+resource "aws_iam_policy" "efs_csi_policy" {
+  name        = "AWSEFSCSIDriverPolicy"
+  description = "IAM policy for EFS CSI Driver"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "elasticfilesystem:DescribeAccessPoints",
+          "elasticfilesystem:CreateAccessPoint",
+          "elasticfilesystem:DeleteAccessPoint",
+          "elasticfilesystem:DescribeFileSystems",
+          "elasticfilesystem:DescribeMountTargets",
+          "ec2:DescribeAvailabilityZones"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+# Create IAM Role for Service Account (IRSA)
+module "efs_csi_irsa_role" {
+  source = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
+
+  role_name             = "efs-csi-role"
+  attach_efs_csi_policy = true
+
+  oidc_providers = {
+    ex = {
+      provider_arn               = module.eks.oidc_provider_arn
+      namespace_service_accounts = ["kube-system:efs-csi-controller-sa"]
+    }
+  }
+
+  tags = {
+    Environment = "dev"
+  }
+}
+
+# EFS Module
+module "efs" {
+  source  = "terraform-aws-modules/efs/aws"
+  version = "~> 1.0"
+
+  # File system
+  name           = "eks-efs"
   encrypted      = true
+  performance_mode = "generalPurpose"
 
-  tags = {
-    Name = "eks-efs"
-  }
-}
+  # File system policy
+  attach_policy = false
 
-# EFS Mount Targets
-resource "aws_efs_mount_target" "main" {
-  count           = 2
-  file_system_id  = aws_efs_file_system.main.id
-  subnet_id       = module.vpc.private_subnets[count.index]
-  security_groups = [aws_security_group.efs.id]
-}
-
-# EFS Security Group
-resource "aws_security_group" "efs" {
-  name        = "efs-sg"
-  description = "Allow inbound NFS traffic from EKS cluster"
-  vpc_id      = module.vpc.vpc_id
-
-  ingress {
-    description     = "NFS from EKS"
-    from_port       = 2049
-    to_port         = 2049
-    protocol        = "tcp"
-    security_groups = [module.eks.cluster_security_group_id]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+  # Mount targets / security group
+  mount_targets = { for k, v in zipmap(module.vpc.azs, module.vpc.private_subnets) : k => { subnet_id = v } }
+  
+  security_group_description = "EFS security group"
+  security_group_vpc_id     = module.vpc.vpc_id
+  security_group_rules = {
+    vpc = {
+      # relying on the defaults provdied for EFS/NFS (2049/TCP + ingress)
+      description = "NFS ingress from EKS"
+      source_security_group_id = module.eks.cluster_security_group_id
+    }
   }
 
   tags = {
-    Name = "efs-sg"
+    Environment = "dev"
+    Terraform   = "true"
   }
+}
+
+# Output the EFS File System ID
+output "efs_file_system_id" {
+  description = "The ID of the EFS file system"
+  value       = module.efs.id
 }
